@@ -1,0 +1,19 @@
+# Local environment variables
+.env
+
+# Python virtual environment
+venv/
+.venv/
+env/
+
+# IDE files
+.vscode/
+.idea/
+
+# OS files
+Thumbs.db
+Desktop.ini
+
+# Python cache
+__pycache__/
+*.pyc
