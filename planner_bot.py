@@ -94,6 +94,16 @@ def execute_query(query, params=None):
 
 def init_db():
     if DATABASE_URL:
+        # Create users table
+        execute_query("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id     BIGINT PRIMARY KEY,
+                username    VARCHAR(255),
+                fullname    VARCHAR(255),
+                first_seen  VARCHAR(50) NOT NULL
+            )
+        """)
+        # Create plans table
         execute_query("""
             CREATE TABLE IF NOT EXISTS plans (
                 id          SERIAL PRIMARY KEY,
@@ -108,6 +118,16 @@ def init_db():
             )
         """)
     else:
+        # Create users table for SQLite
+        execute_query("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id     INTEGER PRIMARY KEY,
+                username    TEXT,
+                fullname    TEXT,
+                first_seen  TEXT NOT NULL
+            )
+        """)
+        # Create plans table for SQLite
         execute_query("""
             CREATE TABLE IF NOT EXISTS plans (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -121,6 +141,22 @@ def init_db():
                 notified    INTEGER DEFAULT 0
             )
         """)
+
+def save_user(user_id, username, fullname):
+    if DATABASE_URL:
+        execute_query(
+            """INSERT INTO users (user_id, username, fullname, first_seen)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT (user_id) DO UPDATE
+               SET username = EXCLUDED.username, fullname = EXCLUDED.fullname""",
+            (user_id, username, fullname, datetime.now(TIMEZONE).isoformat())
+        )
+    else:
+        execute_query(
+            """INSERT OR REPLACE INTO users (user_id, username, fullname, first_seen)
+               VALUES (?, ?, ?, ?)""",
+            (user_id, username, fullname, datetime.now(TIMEZONE).isoformat())
+        )
 
 def add_plan(user_id, title, plan_date, plan_time, description=""):
     execute_query(
@@ -230,7 +266,15 @@ def parse_time(text):
 
 # ──────────────────────── HANDLERS ──────────────────────────
 
+def register_user(update: Update):
+    if update.effective_user:
+        user_id = update.effective_user.id
+        username = update.effective_user.username
+        fullname = update.effective_user.full_name
+        save_user(user_id, username, fullname)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    register_user(update)
     name = update.effective_user.first_name
     text = (
         f"👋 Salom, <b>{name}</b>!\n\n"
@@ -245,6 +289,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="HTML", reply_markup=main_keyboard())
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    register_user(update)
     text = (
         "ℹ️ <b>Yordam</b>\n\n"
         "/start – Bosh menyu\n"
@@ -262,6 +307,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── ADD PLAN conversation ─────────────────────────────────
 async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    register_user(update)
     context.user_data.clear()
     await update.message.reply_text(
         "➕ <b>Yangi reja qo'shish</b>\n\n"
@@ -552,6 +598,7 @@ async def edit_value_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # ── KEYBOARD BUTTON TEXT HANDLER ──────────────────────────
 async def keyboard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    register_user(update)
     text = update.message.text
     if text == "📋 Barcha rejalar":
         await cmd_all(update, context)
