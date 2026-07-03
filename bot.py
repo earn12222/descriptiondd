@@ -1,128 +1,139 @@
 import os
+import json
+import random
 import logging
-import asyncio
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import CommandStart, Command
-from aiogram.enums import ParseMode
-from aiogram.utils.chat_action import ChatActionSender
-from aiogram.exceptions import TelegramBadRequest
+from datetime import datetime, timedelta
+from pathlib import Path
 from dotenv import load_dotenv
-from openai import AsyncOpenAI
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, CallbackQueryHandler
 
-# Atrof-muhit o'zgaruvchilarini yuklash
+# Load environment variables
 load_dotenv()
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+if not TOKEN:
+    raise ValueError("TELEGRAM_BOT_TOKEN not set in .env")
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# Paths
+DATA_DIR = Path(__file__).parent / "data"
+DATA_DIR.mkdir(exist_ok=True)
+USERS_FILE = DATA_DIR / "users.json"
 
-if not BOT_TOKEN or not OPENAI_API_KEY:
-    raise ValueError(
-        "DIQQAT: TELEGRAM_BOT_TOKEN va OPENAI_API_KEY muhit o'zgaruvchilari o'rnatilishi shart! "
-        "Loyiha papkasida .env faylini yarating va unga kalitlarni yozing."
-    )
-
-# OpenAI Clientini yaratish
-client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-
-# Tizim yo'riqnomasi (System Prompt) - faqat dasturlash va IT sohasiga ruxsat berish
-system_instruction = (
-    "Siz faqat dasturlash, IT (axborot texnologiyalari), ma'lumotlar bazasi, veb-dasturlash, "
-    "mobil dasturlash, sun'iy intellekt, algoritmlar va kompyuter ilmlariga (computer science) oid savollarga javob beradigan yordamchisiz. "
-    "Agar foydalanuvchi boshqa mavzuda (masalan, ovqat pishirish, sport, ob-havo, siyosat, musiqa, tarix, umumiy suhbatlar va h.k.) savol bersa, "
-    "muloyimlik bilan faqat dasturlash va IT ga oid savollarga javob bera olishingizni tushuntiring va javob berishdan mutlaqo bosh torting. "
-    "Boshqa mavzulardagi savollarga hech qanday holatda javob bermang. Javoblarni o'zbek tilida, aniq, tushunarli, tizimli va chiroyli formatda taqdim eting. "
-    "Dasturlashga doir savollarga javob berganda amaliy kod namunalarini ko'rsating va ularni izohlab bering."
+# Initialize logging
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
 )
+logger = logging.getLogger(__name__)
 
-# Logging (jurnal yuritish) sozlamalari
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+# Load or initialize user data
+if USERS_FILE.exists():
+    with open(USERS_FILE, "r", encoding="utf-8") as f:
+        users = json.load(f)
+else:
+    users = {}
 
-# Bot va Dispatcher obyektlarini yaratish
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
+INITIAL_COINS = 500  # starting balance for new users
+DAILY_BONUS = 100   # coins granted by daily claim
 
-@dp.message(CommandStart())
-async def command_start_handler(message: types.Message) -> None:
-    """
-    /start komandasi uchun handler. Foydalanuvchini kutib oladi.
-    """
-    user_name = message.from_user.full_name
-    welcome_text = (
-        f"Assalomu alaykum, {user_name}! 🚀\n\n"
-        "Men faqat dasturlash, kompyuter texnologiyalari va IT sohasiga oid savollarga "
-        "javob beruvchi sun'iy intellekt yordamchisiman (GPT). 💻\n\n"
-        "Menga dasturlash tillari, algoritmlar, ma'lumotlar bazalari yoki IT sohasidagi "
-        "har qanday texnik savolingizni yo'llashingiz mumkin.\n\n"
-        "Sizga qanday yordam bera olaman?"
+def save_users():
+    with open(USERS_FILE, "w", encoding="utf-8") as f:
+        json.dump(users, f, ensure_ascii=False, indent=2)
+
+def get_user(user_id: str):
+    if user_id not in users:
+        users[user_id] = {"coins": INITIAL_COINS, "last_daily": None}
+        save_users()
+    return users[user_id]
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = get_user(str(update.effective_user.id))
+    await update.message.reply_text(
+        f"👋 Salom, {update.effective_user.first_name}!\n"
+        f"Sizda hozir {user['coins']} ta token mavjud.\n"
+        "O'yinlarga quyidagi komandalar bilan kirishingiz mumkin:\n"
+        "/balance – balansni ko'rish\n"
+        "/slot – slot‑mashinani o'ynash\n"
+        "/daily – kunlik bonusni olish\n"
+        "/leaderboard – eng boy foydalanuvchilar ro'yxati"
     )
-    await message.answer(welcome_text)
 
-@dp.message(Command("help"))
-async def command_help_handler(message: types.Message) -> None:
-    """
-    /help komandasi uchun handler. Qoidalarni ko'rsatadi.
-    """
-    help_text = (
-        "📖 **Botdan foydalanish bo'yicha yo'riqnoma:**\n\n"
-        "1. **Faqat dasturlash va IT** sohasidagi savollarni so'rang.\n"
-        "2. Boshqa mavzulardagi (masalan: tarix, geografiya, ovqatlar, sport, ob-havo) savollarga bot javob bermaydi.\n"
-        "3. Savolni batafsil va tushunarli qilib yozsangiz, javob ham shunga yarasha aniq bo'ladi.\n\n"
-        "💡 **Misol savollar:**\n"
-        "• *Python-da ro'yxatni qanday tartiblash mumkin?*\n"
-        "• *REST API va GraphQL o'rtasidagi farq nima?*\n"
-        "• *Docker nima va u nima uchun kerak?*"
+async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = get_user(str(update.effective_user.id))
+    await update.message.reply_text(f"💰 Sizning balansingiz: {user['coins']} token")
+
+async def daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = get_user(str(update.effective_user.id))
+    now = datetime.utcnow().isoformat()
+    last = user.get("last_daily")
+    if last:
+        last_dt = datetime.fromisoformat(last)
+        if datetime.utcnow() - last_dt < timedelta(hours=24):
+            remaining = timedelta(hours=24) - (datetime.utcnow() - last_dt)
+            hrs = int(remaining.total_seconds() // 3600)
+            mins = int((remaining.total_seconds() % 3600) // 60)
+            await update.message.reply_text(
+                f"⏳ Siz bugun allaqachon bonus oldingiz. Qolgan vaqt: {hrs}h {mins}m"
+            )
+            return
+    user["coins"] += DAILY_BONUS
+    user["last_daily"] = now
+    save_users()
+    await update.message.reply_text(
+        f"🎉 Kunlik bonus! +{DAILY_BONUS} token. Yangi balans: {user['coins']}"
     )
-    await message.answer(help_text, parse_mode=ParseMode.MARKDOWN)
 
-@dp.message()
-async def message_handler(message: types.Message) -> None:
-    """
-    Kelgan barcha matnli xabarlarni qayta ishlovchi handler.
-    Xabarni olib OpenAI API'ga yuboradi va javobni foydalanuvchiga qaytaradi.
-    """
-    if not message.text:
-        await message.answer("Iltimos, faqat matn ko'rinishidagi savollarni yuboring. ✍️")
+async def slot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = get_user(str(update.effective_user.id))
+    bet = 10
+    if user["coins"] < bet:
+        await update.message.reply_text("❌ Yetarli tokeningiz yo‘q. Balansingizni ko‘rish uchun /balance")
         return
+    # Deduct bet
+    user["coins"] -= bet
+    # Spin three reels (symbols 0‑9)
+    symbols = [random.randint(0, 9) for _ in range(3)]
+    # Simple payout logic: three of a kind -> 5x bet, two of a kind -> 2x bet
+    if symbols[0] == symbols[1] == symbols[2]:
+        win = bet * 5
+        result_msg = "👏 JACKPOT! Uchta bir xil!"
+    elif symbols[0] == symbols[1] or symbols[0] == symbols[2] or symbols[1] == symbols[2]:
+        win = bet * 2
+        result_msg = "👍 Ikki bir xil!"
+    else:
+        win = 0
+        result_msg = "😢 Hech narsa kelmadi."
+    user["coins"] += win
+    save_users()
+    reels = " | ".join(str(s) for s in symbols)
+    await update.message.reply_text(
+        f"🎰 {reels}\n{result_msg}\n"
+        f"+{win} token (bet {bet})\nYangi balans: {user['coins']}"
+    )
 
-    # Foydalanuvchi javob kutayotganida 'typing...' statusini ko'rsatish
-    async with ChatActionSender.typing(bot=bot, chat_id=message.chat.id):
-        try:
-            # OpenAI API ga asinxron murojaat qilish
-            response = await client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": system_instruction},
-                    {"role": "user", "content": message.text}
-                ]
-            )
-            
-            answer_text = response.choices[0].message.content
-            
-            try:
-                # Markdown formatida javobni yuborishga urinib ko'rish
-                await message.answer(answer_text, parse_mode=ParseMode.MARKDOWN)
-            except TelegramBadRequest:
-                # Agar markdown formati Telegram qoidalariga mos kelmay xato bersa, oddiy matn ko'rinishida yuboriladi
-                await message.answer(answer_text)
-                
-        except Exception as e:
-            logging.error(f"OpenAI API yoki Telegram'da xatolik yuz berdi: {e}")
-            await message.answer(
-                "Kechirasiz, savolingizga javob olishda xatolik yuz berdi. "
-                "Iltimos, bir ozdan so'ng qaytadan urinib ko'ring. 🔄"
-            )
+async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Sort users by coins descending, take top 10
+    top = sorted(users.items(), key=lambda item: item[1]["coins"], reverse=True)[:10]
+    if not top:
+        await update.message.reply_text("📊 Hali foydalanuvchilar yo‘q.")
+        return
+    lines = ["🏆 Leaderboard (Top 10):"]
+    for rank, (uid, data) in enumerate(top, start=1):
+        lines.append(f"{rank}. ID {uid[:6]}… – {data['coins']} token")
+    await update.message.reply_text("\n".join(lines))
 
 async def main() -> None:
-    """
-    Botni ishga tushirish (Long Polling)
-    """
-    logging.info("Bot ishga tushmoqda...")
-    # Eski yangilanishlarni (updates) tozalab tashlash
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+    app = ApplicationBuilder().token(TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("balance", balance))
+    app.add_handler(CommandHandler("daily", daily))
+    app.add_handler(CommandHandler("slot", slot))
+    app.add_handler(CommandHandler("leaderboard", leaderboard))
+
+    logger.info("Bot starting…")
+    await app.run_polling()
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logging.info("Bot to'xtatildi!")
+    import asyncio
+    asyncio.run(main())
