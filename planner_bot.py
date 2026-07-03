@@ -597,7 +597,7 @@ def main():
 
     # Eslatma job – har 5 daqiqada
     app.job_queue.run_repeating(send_reminders, interval=300, first=10)
-
+    
     logger.info("🤖 Planner Bot ishga tushdi...")
     app.run_polling(drop_pending_updates=True)
 
