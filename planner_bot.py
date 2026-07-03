@@ -36,9 +36,10 @@ from telegram.ext import (
 
 # ──────────────────────── CONFIG ────────────────────────────
 load_dotenv()
-TOKEN = "8668546166:AAGftWBJPNDariHUMc_wTSybX-tccQhjLHE"
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8668546166:AAGftWBJPNDariHUMc_wTSybX-tccQhjLHE")
 TIMEZONE = ZoneInfo("Asia/Tashkent")   # O'zbekiston vaqti (UTC+5)
 DB_FILE = "plans.db"
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 # Conversation states
 (
@@ -60,36 +61,74 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ──────────────────────── DATABASE ──────────────────────────
-def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS plans (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id     INTEGER NOT NULL,
-            title       TEXT    NOT NULL,
-            plan_date   TEXT    NOT NULL,   -- YYYY-MM-DD
-            plan_time   TEXT    NOT NULL,   -- HH:MM
-            description TEXT,
-            done        INTEGER DEFAULT 0,
-            created_at  TEXT    NOT NULL,
-            notified    INTEGER DEFAULT 0
-        )
-    """)
-    conn.commit()
-    conn.close()
+def execute_query(query, params=None):
+    if params is None:
+        params = ()
+    if DATABASE_URL:
+        # PostgreSQL
+        import psycopg2
+        # SQLite uses ? but PostgreSQL uses %s, replace them
+        query = query.replace("?", "%s")
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        conn.commit()
+        rows = None
+        if cursor.description:
+            rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        return rows
+    else:
+        # SQLite
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        conn.commit()
+        rows = None
+        if cursor.description:
+            rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        return rows
 
-def db():
-    return sqlite3.connect(DB_FILE)
+def init_db():
+    if DATABASE_URL:
+        execute_query("""
+            CREATE TABLE IF NOT EXISTS plans (
+                id          SERIAL PRIMARY KEY,
+                user_id     BIGINT NOT NULL,
+                title       VARCHAR(255) NOT NULL,
+                plan_date   VARCHAR(10) NOT NULL,
+                plan_time   VARCHAR(5) NOT NULL,
+                description TEXT,
+                done        INTEGER DEFAULT 0,
+                created_at  VARCHAR(50) NOT NULL,
+                notified    INTEGER DEFAULT 0
+            )
+        """)
+    else:
+        execute_query("""
+            CREATE TABLE IF NOT EXISTS plans (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id     INTEGER NOT NULL,
+                title       TEXT    NOT NULL,
+                plan_date   TEXT    NOT NULL,
+                plan_time   TEXT    NOT NULL,
+                description TEXT,
+                done        INTEGER DEFAULT 0,
+                created_at  TEXT    NOT NULL,
+                notified    INTEGER DEFAULT 0
+            )
+        """)
 
 def add_plan(user_id, title, plan_date, plan_time, description=""):
-    with db() as conn:
-        conn.execute(
-            "INSERT INTO plans (user_id, title, plan_date, plan_time, description, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (user_id, title, plan_date, plan_time, description,
-             datetime.now(TIMEZONE).isoformat()),
-        )
+    execute_query(
+        "INSERT INTO plans (user_id, title, plan_date, plan_time, description, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (user_id, title, plan_date, plan_time, description,
+         datetime.now(TIMEZONE).isoformat()),
+    )
 
 def get_plans(user_id, filter_date=None, only_pending=False, only_done=False):
     query = "SELECT id, title, plan_date, plan_time, description, done FROM plans WHERE user_id=?"
@@ -102,27 +141,24 @@ def get_plans(user_id, filter_date=None, only_pending=False, only_done=False):
     if only_done:
         query += " AND done=1"
     query += " ORDER BY plan_date, plan_time"
-    with db() as conn:
-        return conn.execute(query, params).fetchall()
+    return execute_query(query, params)
 
 def get_plan_by_id(plan_id, user_id):
-    with db() as conn:
-        return conn.execute(
-            "SELECT id, title, plan_date, plan_time, description, done FROM plans WHERE id=? AND user_id=?",
-            (plan_id, user_id),
-        ).fetchone()
+    rows = execute_query(
+        "SELECT id, title, plan_date, plan_time, description, done FROM plans WHERE id=? AND user_id=?",
+        (plan_id, user_id),
+    )
+    return rows[0] if rows else None
 
 def update_plan_field(plan_id, field, value):
-    with db() as conn:
-        conn.execute(f"UPDATE plans SET {field}=? WHERE id=?", (value, plan_id))
+    assert field in ["title", "plan_date", "plan_time", "description", "done", "notified"]
+    execute_query(f"UPDATE plans SET {field}=? WHERE id=?", (value, plan_id))
 
 def delete_plan(plan_id, user_id):
-    with db() as conn:
-        conn.execute("DELETE FROM plans WHERE id=? AND user_id=?", (plan_id, user_id))
+    execute_query("DELETE FROM plans WHERE id=? AND user_id=?", (plan_id, user_id))
 
 def mark_done(plan_id, user_id, done=1):
-    with db() as conn:
-        conn.execute("UPDATE plans SET done=? WHERE id=? AND user_id=?", (done, plan_id, user_id))
+    execute_query("UPDATE plans SET done=? WHERE id=? AND user_id=?", (done, plan_id, user_id))
 
 def get_upcoming_unnotified(minutes=15):
     """Keyingi 15 daqiqa ichida boshlanadigan, hali xabar yuborilmagan rejalar."""
@@ -132,20 +168,18 @@ def get_upcoming_unnotified(minutes=15):
     date_soon = soon.strftime("%Y-%m-%d")
     time_now = now.strftime("%H:%M")
     time_soon = soon.strftime("%H:%M")
-    with db() as conn:
-        # Bir kunga sig'adigan holat
-        return conn.execute(
-            """SELECT id, user_id, title, plan_date, plan_time FROM plans
-               WHERE done=0 AND notified=0
-               AND ((plan_date=? AND plan_time BETWEEN ? AND ?)
-                 OR (plan_date=? AND plan_date!=? AND plan_time<=?))
-            """,
-            (date_now, time_now, time_soon, date_soon, date_now, time_soon),
-        ).fetchall()
+    
+    return execute_query(
+        """SELECT id, user_id, title, plan_date, plan_time FROM plans
+           WHERE done=0 AND notified=0
+           AND ((plan_date=? AND plan_time BETWEEN ? AND ?)
+             OR (plan_date=? AND plan_date!=? AND plan_time<=?))
+        """,
+        (date_now, time_now, time_soon, date_soon, date_now, time_soon),
+    )
 
 def mark_notified(plan_id):
-    with db() as conn:
-        conn.execute("UPDATE plans SET notified=1 WHERE id=?", (plan_id,))
+    execute_query("UPDATE plans SET notified=1 WHERE id=?", (plan_id,))
 
 # ──────────────────────── HELPERS ───────────────────────────
 def now_uz():
