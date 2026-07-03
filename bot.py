@@ -122,7 +122,7 @@ async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"{rank}. ID {uid[:6]}… – {data['coins']} token")
     await update.message.reply_text("\n".join(lines))
 
-async def main() -> None:
+def main() -> None:
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -132,8 +132,7 @@ async def main() -> None:
     app.add_handler(CommandHandler("leaderboard", leaderboard))
 
     logger.info("Bot starting…")
-    await app.run_polling()
+    app.run_polling()
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    main()
